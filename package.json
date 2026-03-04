@@ -1,0 +1,10 @@
+{
+  "name": "@shonstephens/mcp-redhat-account",
+  "version": "0.1.0",
+  "description": "MCP server for Red Hat Account Management",
+  "private": false,
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "license": "MIT"
+}
