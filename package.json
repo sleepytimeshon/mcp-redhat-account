@@ -1,6 +1,6 @@
 {
   "name": "mcp-redhat-account",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "MCP server for Red Hat Account Management API",
   "type": "module",
   "bin": {
