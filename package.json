@@ -1,6 +1,6 @@
 {
   "name": "mcp-redhat-account",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "MCP server for Red Hat Account Management API",
   "type": "module",
   "bin": {
@@ -19,11 +19,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/shonstephens/mcp-redhat-account.git"
+    "url": "git+https://github.com/sleepytimeshon/mcp-redhat-account.git"
   },
-  "homepage": "https://github.com/shonstephens/mcp-redhat-account#readme",
+  "homepage": "https://github.com/sleepytimeshon/mcp-redhat-account#readme",
   "bugs": {
-    "url": "https://github.com/shonstephens/mcp-redhat-account/issues"
+    "url": "https://github.com/sleepytimeshon/mcp-redhat-account/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
