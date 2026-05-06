@@ -63,8 +63,46 @@ async function apiRequest(path, options = {}) {
   return text ? JSON.parse(text) : null;
 }
 
-function jsonResponse(data) {
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+// --- Response pagination ---
+
+const DEFAULT_CHUNK = 30000;
+
+function paginate(text, offset, limit, label) {
+  const total = text.length;
+  const start = Math.min(offset, total);
+  const end = Math.min(start + limit, total);
+  const slice = text.slice(start, end);
+  const header = `# ${label}\n# chars ${start}-${end} of ${total}\n\n`;
+  const footer =
+    end < total
+      ? `\n\n[truncated: showing chars ${start}-${end} of ${total}. Call again with offset=${end} for the next chunk.]`
+      : "";
+  return `${header}${slice}${footer}`;
+}
+
+const paginationSchema = {
+  offset: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .default(0)
+    .describe(`Byte offset into the rendered response. Default 0. Use the value from the previous call's "[truncated]" footer to fetch the next chunk.`),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .default(DEFAULT_CHUNK)
+    .describe(`Maximum characters to return in this call. Default ${DEFAULT_CHUNK} keeps responses under typical MCP tool-result token caps.`),
+};
+
+function jsonResponse(data, offset, limit, label) {
+  const text = JSON.stringify(data, null, 2);
+  if (offset === undefined && limit === undefined) {
+    return { content: [{ type: "text", text }] };
+  }
+  return { content: [{ type: "text", text: paginate(text, offset ?? 0, limit ?? DEFAULT_CHUNK, label ?? "response") }] };
 }
 
 function paginationParams(firstResultIndex, maxResults) {
@@ -76,7 +114,7 @@ function paginationParams(firstResultIndex, maxResults) {
 
 const server = new McpServer({
   name: "mcp-redhat-account",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
 // === Accounts ===
@@ -84,16 +122,17 @@ const server = new McpServer({
 server.registerTool(
   "listAccounts",
   {
-    description: "List account details for the current user's Red Hat accounts",
+    description: "List account details for the current user's Red Hat accounts. Large responses are paginated — call repeatedly with `offset` to read subsequent chunks.",
     inputSchema: {
-      firstResultIndex: z.number().optional().default(0).describe("Pagination start index (default 0)"),
-      maxResults: z.number().optional().default(100).describe("Maximum results to return (default 100)"),
+      firstResultIndex: z.number().optional().default(0).describe("Upstream API row-pagination start index (default 0)"),
+      maxResults: z.number().optional().default(100).describe("Upstream API max rows to return (default 100)"),
+      ...paginationSchema,
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
-  async ({ firstResultIndex, maxResults }) => {
+  async ({ firstResultIndex, maxResults, offset, limit }) => {
     const data = await apiRequest(`/accounts?${paginationParams(firstResultIndex, maxResults)}`);
-    return jsonResponse(data);
+    return jsonResponse(data, offset, limit, "listAccounts");
   }
 );
 
@@ -112,20 +151,21 @@ server.registerTool(
 server.registerTool(
   "listUsers",
   {
-    description: "List all users under a Red Hat account. Only Org Admins can list all users.",
+    description: "List all users under a Red Hat account. Only Org Admins can list all users. Large responses are paginated — call repeatedly with `offset` to read subsequent chunks.",
     inputSchema: {
       accountId: z.string().describe("The account ID"),
       status: z.enum(["enabled", "disabled", "any"]).optional().default("enabled").describe("Filter by user status (default 'enabled')"),
-      firstResultIndex: z.number().optional().default(0).describe("Pagination start index"),
-      maxResults: z.number().optional().default(100).describe("Maximum results to return"),
+      firstResultIndex: z.number().optional().default(0).describe("Upstream API row-pagination start index"),
+      maxResults: z.number().optional().default(100).describe("Upstream API max rows to return"),
+      ...paginationSchema,
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
-  async ({ accountId, status, firstResultIndex, maxResults }) => {
+  async ({ accountId, status, firstResultIndex, maxResults, offset, limit }) => {
     const params = paginationParams(firstResultIndex, maxResults);
     params.set("status", status);
     const data = await apiRequest(`/accounts/${accountId}/users?${params}`);
-    return jsonResponse(data);
+    return jsonResponse(data, offset, limit, `listUsers: ${accountId}`);
   }
 );
 
