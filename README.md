@@ -19,6 +19,16 @@ An [MCP](https://modelcontextprotocol.io/) server for the Red Hat Account Manage
 | `removeUserRole` | Remove a role from a user (Org Admin only) |
 | `inviteUsers` | Invite new users to join an account by email (Org Admin only) |
 
+## Pagination
+
+`listAccounts` and `listUsers` accept optional `offset` (default 0) and `limit` (default 30000) parameters to chunk response output. Listing users for a large organization can exceed typical MCP tool-result token caps when returned whole. When a response is truncated, the output ends with a footer like:
+
+```
+[truncated: showing chars 0-30000 of 102783. Call again with offset=30000 for the next chunk.]
+```
+
+Pass that `offset` back to fetch the next chunk. Small responses return in one call. The upstream API's `firstResultIndex`/`maxResults` row-pagination is preserved unchanged on both tools.
+
 ## Prerequisites
 
 - Node.js 18+
