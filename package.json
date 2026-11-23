@@ -4,7 +4,7 @@
   "description": "MCP server for Red Hat Account Management API",
   "type": "module",
   "bin": {
-    "mcp-redhat-account": "./src/index.js"
+    "mcp-redhat-account": "src/index.js"
   },
   "main": "./src/index.js",
   "engines": {
