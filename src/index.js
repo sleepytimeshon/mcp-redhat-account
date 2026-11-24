@@ -114,7 +114,7 @@ function paginationParams(firstResultIndex, maxResults) {
 
 const server = new McpServer({
   name: "mcp-redhat-account",
-  version: "1.1.1",
+  version: "1.1.2",
 });
 
 // === Accounts ===
