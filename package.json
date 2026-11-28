@@ -1,6 +1,6 @@
 {
   "name": "mcp-redhat-account",
-  "version": "1.1.2",
+  "version": "2.0.0",
   "description": "MCP server for Red Hat Account Management API",
   "type": "module",
   "bin": {
@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "start": "node src/index.js",
-    "test": "node test/smoke.mjs"
+    "test": "node test/smoke.mjs && node test/unit.mjs"
   },
   "keywords": [
     "mcp",

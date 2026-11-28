@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-27
+
+### Added
+- `searchUsers` tool: look up as many as 100 users by username or user ID in one call, listing the ones not found.
+- `accountId` defaults to the token user's account when the user belongs to exactly one.
+- Offline unit tests (`test/unit.mjs`), run by `npm test`.
+
+### Changed
+- Tool output is Markdown for a language model instead of raw API JSON.
+- `createUser` only validates by default (`validateOnly`, default true, replaces `validateUser`, default false); pass `validateOnly: false` to create the user.
+- `listUsers` pages with `startAt` (formerly `firstResultIndex`) and `maxResults` limited to 1-1000, and notes when a full page may have more users. `listAccounts` no longer takes paging parameters.
+- A 403 explains that the action needs the organization administrator role and which tools still work for your own user; an empty listing for an account you do not belong to says so.
+- API errors (RFC 7807 problem documents) are reported as one readable line, and a rejected cached access token is exchanged again once.
+- IDs, usernames, and email addresses are validated before they reach a request.
+- API client, validation, and formatters moved to `src/lib.js`.
+
+### Fixed
+- Every Red Hat API request times out after 30 seconds instead of waiting indefinitely on a stalled endpoint.
+- The pagination `offset` parameter is described in characters, not bytes.
+- `listUsers` with `maxResults` above 1000 returned only your own user instead of a 403, which looked like a one-user account.
+
 ## [1.1.2] - 2026-11-23
 
 ### Added
@@ -55,7 +76,8 @@ All notable changes to this project are documented in this file. The format is b
 ### Added
 - First public release: an MCP server for the Red Hat Account Management API with 12 tools for accounts, users, user status, and role assignments.
 
-[Unreleased]: https://github.com/sleepytimeshon/mcp-redhat-account/compare/v1.1.2...HEAD
+[Unreleased]: https://github.com/sleepytimeshon/mcp-redhat-account/compare/v2.0.0...HEAD
+[2.0.0]: https://www.npmjs.com/package/mcp-redhat-account/v/2.0.0
 [1.1.2]: https://www.npmjs.com/package/mcp-redhat-account/v/1.1.2
 [1.1.1]: https://www.npmjs.com/package/mcp-redhat-account/v/1.1.1
 [1.1.0]: https://www.npmjs.com/package/mcp-redhat-account/v/1.1.0

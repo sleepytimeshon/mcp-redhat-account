@@ -3,82 +3,23 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-
-const TOKEN_URL = "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token";
-const API_BASE = "https://api.access.redhat.com/account/v1";
-const CLIENT_ID = "rhsm-api";
-
-let cachedToken = null;
-let tokenExpiry = 0;
-
-async function getAccessToken() {
-  if (cachedToken && Date.now() < tokenExpiry) {
-    return cachedToken;
-  }
-
-  const offlineToken = process.env.REDHAT_TOKEN;
-  if (!offlineToken) {
-    throw new Error("REDHAT_TOKEN environment variable is required (Red Hat offline API token)");
-  }
-
-  const res = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      client_id: CLIENT_ID,
-      refresh_token: offlineToken,
-    }),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Token exchange failed (${res.status}): ${text}`);
-  }
-
-  const data = await res.json();
-  cachedToken = data.access_token;
-  tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-  return cachedToken;
-}
-
-async function apiRequest(path, options = {}) {
-  const token = await getAccessToken();
-  const url = `${API_BASE}${path}`;
-  const res = await fetch(url, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-      ...options.headers,
-    },
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`API request failed (${res.status} ${res.statusText}): ${text}`);
-  }
-
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
-}
-
-// --- Response pagination ---
-
-const DEFAULT_CHUNK = 30000;
-
-function paginate(text, offset, limit, label) {
-  const total = text.length;
-  const start = Math.min(offset, total);
-  const end = Math.min(start + limit, total);
-  const slice = text.slice(start, end);
-  const header = `# ${label}\n# chars ${start}-${end} of ${total}\n\n`;
-  const footer =
-    end < total
-      ? `\n\n[truncated: showing chars ${start}-${end} of ${total}. Call again with offset=${end} for the next chunk.]`
-      : "";
-  return `${header}${slice}${footer}`;
-}
+import {
+  apiRequest,
+  DEFAULT_CHUNK,
+  emptyResultNote,
+  formatAccounts,
+  formatUser,
+  formatUserList,
+  getMyAccounts,
+  MAX_USERS_PAGE,
+  normalizeEmail,
+  normalizeLogin,
+  normalizeUserId,
+  paginate,
+  PERMISSIONS,
+  resolveAccountId,
+  ROLES,
+} from "./lib.js";
 
 const paginationSchema = {
   offset: z
@@ -87,7 +28,7 @@ const paginationSchema = {
     .nonnegative()
     .optional()
     .default(0)
-    .describe(`Byte offset into the rendered response. Default 0. Use the value from the previous call's "[truncated]" footer to fetch the next chunk.`),
+    .describe(`Character offset into the rendered response. Default 0. Use the value from the previous call's "[truncated]" footer to fetch the next chunk.`),
   limit: z
     .number()
     .int()
@@ -97,53 +38,45 @@ const paginationSchema = {
     .describe(`Maximum characters to return in this call. Default ${DEFAULT_CHUNK} keeps responses under typical MCP tool-result token caps.`),
 };
 
-function jsonResponse(data, offset, limit, label) {
-  const text = JSON.stringify(data, null, 2);
-  if (offset === undefined && limit === undefined) {
-    return { content: [{ type: "text", text }] };
-  }
-  return { content: [{ type: "text", text: paginate(text, offset ?? 0, limit ?? DEFAULT_CHUNK, label ?? "response") }] };
-}
+const accountIdSchema = z.string().optional().describe("Account ID; defaults to your account (see listAccounts)");
+const userIdSchema = z.string().describe("User ID (digits; getCurrentUser gives your own)");
+const permissionsSchema = z.array(z.enum(PERMISSIONS)).optional();
+const rolesSchema = z.array(z.enum(ROLES)).optional();
+const addressSchema = z.object({
+  streets: z.array(z.string()).optional(),
+  city: z.string().optional(),
+  state: z.string().optional(),
+  county: z.string().optional(),
+  country: z.string().optional(),
+  zipCode: z.string().optional(),
+}).optional().describe("Mailing address");
 
-function paginationParams(firstResultIndex, maxResults) {
-  return new URLSearchParams({
-    firstResultIndex: String(firstResultIndex),
-    maxResults: String(maxResults),
-  });
-}
+const READ = { readOnlyHint: true, openWorldHint: true };
+const textResult = (text) => ({ content: [{ type: "text", text }] });
+const server = new McpServer({ name: "mcp-redhat-account", version: "2.0.0" });
 
-const server = new McpServer({
-  name: "mcp-redhat-account",
-  version: "1.1.2",
-});
+const compact = (obj) => Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 
-// === Accounts ===
+// === Accounts and the current user ===
 
 server.registerTool(
   "listAccounts",
   {
-    description: "List account details for the current user's Red Hat accounts. Large responses are paginated — call repeatedly with `offset` to read subsequent chunks.",
-    inputSchema: {
-      firstResultIndex: z.number().optional().default(0).describe("Upstream API row-pagination start index (default 0)"),
-      maxResults: z.number().optional().default(100).describe("Upstream API max rows to return (default 100)"),
-      ...paginationSchema,
-    },
-    annotations: { readOnlyHint: true, openWorldHint: true },
+    description: "List the Red Hat accounts the REDHAT_TOKEN user belongs to (ID, name, type). Other tools default to the user's account when there is only one.",
+    inputSchema: {},
+    annotations: READ,
   },
-  async ({ firstResultIndex, maxResults, offset, limit }) => {
-    const data = await apiRequest(`/accounts?${paginationParams(firstResultIndex, maxResults)}`);
-    return jsonResponse(data, offset, limit, "listAccounts");
-  }
+  async () => textResult(formatAccounts(await getMyAccounts()))
 );
 
 server.registerTool(
   "getCurrentUser",
   {
-    description: "Get personal information of the currently authenticated Red Hat user",
+    description: "Get the REDHAT_TOKEN user's own personal information: user ID, username, name, email, and status.",
     inputSchema: {},
-    annotations: { readOnlyHint: true, openWorldHint: true },
+    annotations: READ,
   },
-  async () => jsonResponse(await apiRequest("/user"))
+  async () => textResult(formatUser((await apiRequest("/user"))?.body || {}, { title: "Current user" }))
 );
 
 // === Users ===
@@ -151,246 +84,217 @@ server.registerTool(
 server.registerTool(
   "listUsers",
   {
-    description: "List all users under a Red Hat account. Only Org Admins can list all users. Large responses are paginated — call repeatedly with `offset` to read subsequent chunks.",
+    description: "List the users on an account (username, user ID, name, email, status, permissions). Only organization administrators can list users. Pages with maxResults and startAt; large output is paginated — call again with `offset`.",
     inputSchema: {
-      accountId: z.string().describe("The account ID"),
-      status: z.enum(["enabled", "disabled", "any"]).optional().default("enabled").describe("Filter by user status (default 'enabled')"),
-      firstResultIndex: z.number().optional().default(0).describe("Upstream API row-pagination start index"),
-      maxResults: z.number().optional().default(100).describe("Upstream API max rows to return"),
+      accountId: accountIdSchema,
+      status: z.enum(["enabled", "disabled", "any"]).optional().default("enabled").describe("Which users to list (default enabled)"),
+      maxResults: z.number().int().min(1).max(MAX_USERS_PAGE).optional().default(100).describe(`Users per call, 1-${MAX_USERS_PAGE} (default 100)`),
+      startAt: z.number().int().nonnegative().optional().default(0).describe("Skip this many users (for the next page)"),
       ...paginationSchema,
     },
-    annotations: { readOnlyHint: true, openWorldHint: true },
+    annotations: READ,
   },
-  async ({ accountId, status, firstResultIndex, maxResults, offset, limit }) => {
-    const params = paginationParams(firstResultIndex, maxResults);
-    params.set("status", status);
-    const data = await apiRequest(`/accounts/${accountId}/users?${params}`);
-    return jsonResponse(data, offset, limit, `listUsers: ${accountId}`);
+  async ({ accountId, status, maxResults, startAt, offset, limit }) => {
+    const acct = await resolveAccountId(accountId);
+    const data = await apiRequest(`/accounts/${acct}/users`, { query: { status, maxResults, firstResultIndex: startAt } });
+    const list = data?.body || [];
+    const note = list.length ? "" : await emptyResultNote(acct);
+    return textResult(paginate(formatUserList(list, { accountId: acct, startAt, limit: maxResults }) + note, offset, limit, `listUsers: ${acct}`));
+  }
+);
+
+server.registerTool(
+  "searchUsers",
+  {
+    description: "Look up as many as 100 users on an account by username or by user ID (give one or the other). Organization administrators can find any user on the account. Users not found are listed.",
+    inputSchema: {
+      accountId: accountIdSchema,
+      usernames: z.array(z.string()).min(1).max(100).optional().describe("Usernames (logins) to look up"),
+      userIds: z.array(z.string()).min(1).max(100).optional().describe("User IDs to look up"),
+      ...paginationSchema,
+    },
+    annotations: READ,
+  },
+  async ({ accountId, usernames, userIds, offset, limit }) => {
+    if (Boolean(usernames) === Boolean(userIds)) throw new Error("Give either usernames or userIds, not both");
+    const acct = await resolveAccountId(accountId);
+    const by = usernames ? { logins: usernames.map(normalizeLogin) } : { ids: userIds.map(normalizeUserId) };
+    const list = (await apiRequest(`/accounts/${acct}/users/search`, { method: "POST", body: { by } }))?.body || [];
+    const found = new Set(list.flatMap((s) => [s.user?.username, s.user?.id].filter(Boolean).map((x) => String(x).toLowerCase())));
+    const missing = (by.logins || by.ids).filter((x) => !found.has(String(x).toLowerCase()));
+    const note = missing.length ? `\n\nNot found: ${missing.join(", ")}.${await emptyResultNote(acct)}` : "";
+    return textResult(paginate(formatUserList(list, { accountId: acct, title: "Matching users" }) + note, offset, limit, `searchUsers: ${acct}`));
   }
 );
 
 server.registerTool(
   "getUserDetails",
   {
-    description: "Get details of a specific user. Org Admins can view any user; others can only view themselves.",
-    inputSchema: {
-      accountId: z.string().describe("The account ID"),
-      userId: z.string().describe("The user ID"),
-    },
-    annotations: { readOnlyHint: true, openWorldHint: true },
+    description: "Get a user's details: username, name, email, phone, address, status, roles, and permissions. Organization administrators can read any user on the account; others only themselves.",
+    inputSchema: { accountId: accountIdSchema, userId: userIdSchema },
+    annotations: READ,
   },
   async ({ accountId, userId }) => {
-    return jsonResponse(await apiRequest(`/accounts/${accountId}/users/${userId}`));
+    const acct = await resolveAccountId(accountId);
+    return textResult(formatUser((await apiRequest(`/accounts/${acct}/users/${normalizeUserId(userId)}`))?.body || {}));
+  }
+);
+
+server.registerTool(
+  "getUserStatus",
+  {
+    description: "Get whether a user is enabled or disabled. Organization administrators can read any user; others only themselves.",
+    inputSchema: { accountId: accountIdSchema, userId: userIdSchema },
+    annotations: READ,
+  },
+  async ({ accountId, userId }) => {
+    const acct = await resolveAccountId(accountId);
+    const id = normalizeUserId(userId);
+    const status = (await apiRequest(`/accounts/${acct}/users/${id}/status`))?.body?.status;
+    return textResult(`User ${id} on account ${acct} is ${status || "of unknown status"}.`);
+  }
+);
+
+server.registerTool(
+  "getUserRoles",
+  {
+    description: "Get the roles of a user (for example organization_administrator). Organization administrators can read any user; others only themselves.",
+    inputSchema: { accountId: accountIdSchema, userId: userIdSchema },
+    annotations: READ,
+  },
+  async ({ accountId, userId }) => {
+    const acct = await resolveAccountId(accountId);
+    const id = normalizeUserId(userId);
+    const roles = (await apiRequest(`/accounts/${acct}/users/${id}/roles`))?.body?.roles || [];
+    return textResult(`User ${id} on account ${acct} has ${roles.length ? `the roles: ${roles.join(", ")}` : "no roles"}.`);
   }
 );
 
 server.registerTool(
   "createUser",
   {
-    description: "Create a new user under a Red Hat account. Only Org Admins can create users. Set validateUser=true to validate input without saving.",
+    description: "Create a user on an account (organization administrators only). By default this only validates the input and creates nothing; set validateOnly to false to create the user.",
     inputSchema: {
-      accountId: z.string().describe("The account ID"),
-      validateUser: z.boolean().optional().default(false).describe("If true, validate input without saving (returns 204 if valid)"),
-      username: z.string().describe("Username for the new user"),
-      firstName: z.string().describe("First name"),
-      lastName: z.string().describe("Last name"),
+      accountId: accountIdSchema,
+      validateOnly: z.boolean().optional().default(true).describe("Only validate the input (default true); false creates the user"),
+      username: z.string().min(1).describe("Username for the new user"),
+      firstName: z.string().min(1).describe("First name"),
+      lastName: z.string().min(1).describe("Last name"),
       email: z.string().describe("Email address"),
       salutation: z.string().optional().describe("Salutation (e.g. Mr., Ms.)"),
       phone: z.string().optional().describe("Phone number"),
-      address: z.object({
-        streets: z.array(z.string()).optional(),
-        city: z.string().optional(),
-        state: z.string().optional(),
-        county: z.string().optional(),
-        country: z.string().optional(),
-        zipCode: z.string().optional(),
-      }).optional().describe("Mailing address"),
-      permissions: z.array(z.enum([
-        "portal_download", "portal_system_management",
-        "portal_manage_subscriptions", "portal_manage_cases",
-      ])).optional().describe("Permissions to assign"),
-      roles: z.array(z.enum(["organization_administrator"])).optional().describe("Roles to assign"),
+      address: addressSchema,
+      permissions: permissionsSchema.describe(`Permissions: ${PERMISSIONS.join(", ")}`),
+      roles: rolesSchema.describe("Roles to assign"),
     },
     annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
-  async ({ accountId, validateUser, ...userData }) => {
-    const params = new URLSearchParams({ validateUser: String(validateUser) });
-    const data = await apiRequest(`/accounts/${accountId}/users?${params}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(userData),
-    });
-    if (data === null) {
-      return { content: [{ type: "text", text: "Validation passed (204 No Content)" }] };
+  async ({ accountId, validateOnly, ...user }) => {
+    const acct = await resolveAccountId(accountId);
+    const body = compact({ ...user, username: normalizeLogin(user.username), email: normalizeEmail(user.email) });
+    const data = await apiRequest(`/accounts/${acct}/users`, { method: "POST", query: { validateUser: validateOnly }, body });
+    if (validateOnly) {
+      return textResult(`Validation passed for ${body.username} on account ${acct}; nothing was created. Call again with validateOnly: false to create the user.`);
     }
-    return jsonResponse(data);
+    return textResult(`Created user ${body.username} on account ${acct}.\n\n${formatUser(data?.body || body)}`);
   }
 );
 
 server.registerTool(
   "updateUser",
   {
-    description: "Update a user's details. Org Admins can update email, roles, and permissions. Users can update their own name, address, and phone.",
+    description: "Update a user. Organization administrators can change another user's email, roles, and permissions; name, salutation, phone, and address can be changed only by the user themselves. Roles and permissions replace the current lists.",
     inputSchema: {
-      accountId: z.string().describe("The account ID"),
-      userId: z.string().describe("The user ID"),
-      salutation: z.string().optional().describe("Salutation"),
-      firstName: z.string().optional().describe("First name"),
-      lastName: z.string().optional().describe("Last name"),
-      phone: z.string().optional().describe("Phone number"),
-      email: z.string().optional().describe("Email address"),
-      address: z.object({
-        streets: z.array(z.string()).optional(),
-        city: z.string().optional(),
-        state: z.string().optional(),
-        county: z.string().optional(),
-        country: z.string().optional(),
-        zipCode: z.string().optional(),
-      }).optional().describe("Mailing address"),
-      permissions: z.array(z.enum([
-        "portal_download", "portal_system_management",
-        "portal_manage_subscriptions", "portal_manage_cases",
-      ])).optional().describe("Permissions to set"),
-      roles: z.array(z.enum(["organization_administrator"])).optional().describe("Roles to set"),
+      accountId: accountIdSchema,
+      userId: userIdSchema,
+      salutation: z.string().optional(),
+      firstName: z.string().optional(),
+      lastName: z.string().optional(),
+      phone: z.string().optional(),
+      email: z.string().optional(),
+      address: addressSchema,
+      permissions: permissionsSchema.describe(`Full list of permissions: ${PERMISSIONS.join(", ")}`),
+      roles: rolesSchema.describe("Full list of roles"),
     },
     annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   async ({ accountId, userId, ...fields }) => {
-    const body = {};
-    for (const [k, v] of Object.entries(fields)) {
-      if (v !== undefined) body[k] = v;
-    }
-    const data = await apiRequest(`/accounts/${accountId}/users/${userId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    return jsonResponse(data);
-  }
-);
-
-// === User Status ===
-
-server.registerTool(
-  "getUserStatus",
-  {
-    description: "Get the current status of a user. Org Admins can view any user's status.",
-    inputSchema: {
-      accountId: z.string().describe("The account ID"),
-      userId: z.string().describe("The user ID"),
-    },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  async ({ accountId, userId }) => {
-    return jsonResponse(await apiRequest(`/accounts/${accountId}/users/${userId}/status`));
+    const acct = await resolveAccountId(accountId);
+    const id = normalizeUserId(userId);
+    const body = compact({ ...fields, email: fields.email ? normalizeEmail(fields.email) : undefined });
+    if (Object.keys(body).length === 0) throw new Error("No fields to update");
+    const data = await apiRequest(`/accounts/${acct}/users/${id}`, { method: "POST", body });
+    return textResult(`Updated user ${id} (${Object.keys(body).join(", ")}).\n\n${formatUser(data?.body || {})}`);
   }
 );
 
 server.registerTool(
   "updateUserStatus",
   {
-    description: "Enable or disable a user. Only Org Admins can update user status.",
+    description: "Enable or disable a user (organization administrators only). A disabled user cannot log in.",
     inputSchema: {
-      accountId: z.string().describe("The account ID"),
-      userId: z.string().describe("The user ID"),
-      status: z.enum(["enabled", "disabled"]).describe("New status for the user"),
+      accountId: accountIdSchema,
+      userId: userIdSchema,
+      status: z.enum(["enabled", "disabled"]).describe("New status"),
     },
     annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },
   async ({ accountId, userId, status }) => {
-    const data = await apiRequest(`/accounts/${accountId}/users/${userId}/status`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status }),
-    });
-    return jsonResponse(data);
-  }
-);
-
-// === User Roles ===
-
-server.registerTool(
-  "getUserRoles",
-  {
-    description: "Get all roles assigned to a user. Org Admins can view any user's roles.",
-    inputSchema: {
-      accountId: z.string().describe("The account ID"),
-      userId: z.string().describe("The user ID"),
-    },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  async ({ accountId, userId }) => {
-    return jsonResponse(await apiRequest(`/accounts/${accountId}/users/${userId}/roles`));
+    const acct = await resolveAccountId(accountId);
+    const id = normalizeUserId(userId);
+    const data = await apiRequest(`/accounts/${acct}/users/${id}/status`, { method: "POST", body: { status } });
+    return textResult(`User ${id} on account ${acct} is now ${data?.body?.status || status}.`);
   }
 );
 
 server.registerTool(
   "assignUserRole",
   {
-    description: "Assign a role to a user. Only Org Admins can assign roles.",
-    inputSchema: {
-      accountId: z.string().describe("The account ID"),
-      userId: z.string().describe("The user ID"),
-      role: z.enum(["organization_administrator"]).describe("The role to assign"),
-    },
+    description: "Give a user a role (organization administrators only).",
+    inputSchema: { accountId: accountIdSchema, userId: userIdSchema, role: z.enum(ROLES).describe("Role to assign") },
     annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   async ({ accountId, userId, role }) => {
-    const data = await apiRequest(`/accounts/${accountId}/users/${userId}/roles`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ role }),
-    });
-    return jsonResponse(data);
+    const acct = await resolveAccountId(accountId);
+    const id = normalizeUserId(userId);
+    const roles = (await apiRequest(`/accounts/${acct}/users/${id}/roles`, { method: "POST", body: { role } }))?.body?.roles || [];
+    return textResult(`Assigned ${role} to user ${id}. Roles now: ${roles.join(", ") || "none"}.`);
   }
 );
 
 server.registerTool(
   "removeUserRole",
   {
-    description: "Remove a role from a user. Only Org Admins can remove roles.",
-    inputSchema: {
-      accountId: z.string().describe("The account ID"),
-      userId: z.string().describe("The user ID"),
-      role: z.enum(["organization_administrator"]).describe("The role to remove"),
-    },
+    description: "Remove a role from a user (organization administrators only).",
+    inputSchema: { accountId: accountIdSchema, userId: userIdSchema, role: z.enum(ROLES).describe("Role to remove") },
     annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },
   async ({ accountId, userId, role }) => {
-    const data = await apiRequest(`/accounts/${accountId}/users/${userId}/roles`, {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ role }),
-    });
-    return jsonResponse(data);
+    const acct = await resolveAccountId(accountId);
+    const id = normalizeUserId(userId);
+    const roles = (await apiRequest(`/accounts/${acct}/users/${id}/roles`, { method: "DELETE", body: { role } }))?.body?.roles || [];
+    return textResult(`Removed ${role} from user ${id}. Roles now: ${roles.join(", ") || "none"}.`);
   }
 );
-
-// === User Invitations ===
 
 server.registerTool(
   "inviteUsers",
   {
-    description: "Invite new users to join a Red Hat account by email. Only Org Admins can invite users.",
+    description: "Email invitations to join an account (organization administrators only), optionally with permissions and roles for the new users.",
     inputSchema: {
-      accountId: z.string().describe("The account ID"),
-      emails: z.array(z.string()).describe("Email addresses to invite"),
-      localeCode: z.string().optional().describe("Locale for the invitation email (e.g. 'en')"),
-      permissions: z.array(z.enum([
-        "portal_download", "portal_system_management",
-        "portal_manage_subscriptions", "portal_manage_cases",
-      ])).optional().describe("Permissions to grant invited users"),
-      roles: z.array(z.enum(["organization_administrator"])).optional().describe("Roles to assign to invited users"),
+      accountId: accountIdSchema,
+      emails: z.array(z.string()).min(1).max(100).describe("Email addresses to invite"),
+      localeCode: z.string().optional().describe("Language of the invitation email (e.g. 'en', 'ja')"),
+      permissions: permissionsSchema.describe(`Permissions for the invited users: ${PERMISSIONS.join(", ")}`),
+      roles: rolesSchema.describe("Roles for the invited users"),
     },
     annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
-  async ({ accountId, ...inviteData }) => {
-    const data = await apiRequest(`/accounts/${accountId}/users/invite`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(inviteData),
-    });
-    return jsonResponse(data);
+  async ({ accountId, emails, localeCode, permissions, roles }) => {
+    const acct = await resolveAccountId(accountId);
+    const body = compact({ emails: emails.map(normalizeEmail), localeCode, permissions, roles });
+    const data = await apiRequest(`/accounts/${acct}/users/invite`, { method: "POST", body });
+    return textResult(`Invited ${body.emails.length} user(s) to account ${acct}${data?.body?.status ? `: ${data.body.status}` : ""}.`);
   }
 );
 

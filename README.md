@@ -6,28 +6,41 @@ An [MCP](https://modelcontextprotocol.io/) server for the Red Hat Account Manage
 
 | Tool | Description |
 |------|-------------|
-| `listAccounts` | List account details for the current user's Red Hat accounts |
-| `getCurrentUser` | Get personal information of the currently authenticated user |
-| `listUsers` | List all users under an account (Org Admin only) |
-| `getUserDetails` | Get details of a specific user |
-| `createUser` | Create a new user under an account (Org Admin only) |
-| `updateUser` | Update a user's details (email, roles, permissions, address, etc.) |
-| `getUserStatus` | Get the current status of a user |
-| `updateUserStatus` | Enable or disable a user (Org Admin only) |
-| `getUserRoles` | Get all roles assigned to a user |
-| `assignUserRole` | Assign a role to a user (Org Admin only) |
-| `removeUserRole` | Remove a role from a user (Org Admin only) |
-| `inviteUsers` | Invite new users to join an account by email (Org Admin only) |
+| `listAccounts` | List the accounts the token user belongs to |
+| `getCurrentUser` | Get the token user's own ID, username, name, email, and status |
+| `listUsers` | List an account's users, enabled, disabled, or both (organization administrators only) |
+| `searchUsers` | Look up as many as 100 users by username or user ID |
+| `getUserDetails` | Get a user's details, roles, permissions, and address |
+| `getUserStatus` | Get whether a user is enabled or disabled |
+| `getUserRoles` | Get a user's roles |
+| `createUser` | Validate, or with `validateOnly: false` create, a user (organization administrators only) |
+| `updateUser` | Update a user's email, roles, and permissions (administrators) or name, phone, and address (the user) |
+| `updateUserStatus` | Enable or disable a user (organization administrators only) |
+| `assignUserRole` | Give a user a role (organization administrators only) |
+| `removeUserRole` | Remove a role from a user (organization administrators only) |
+| `inviteUsers` | Email invitations to join an account (organization administrators only) |
+
+Every tool that takes `accountId` defaults to the token user's account when the user belongs to exactly one (see `listAccounts`).
+
+## Permissions
+
+Only organization administrators can list, search, create, or change other users. Without that role, the API answers 403 and the tools say so, and you can still read your own user with `getCurrentUser`, `getUserDetails`, `getUserStatus`, and `getUserRoles`. Listing an account you do not belong to returns an empty list rather than an error; `listUsers` and `searchUsers` point that out.
 
 ## Pagination
 
-`listAccounts` and `listUsers` accept optional `offset` (default 0) and `limit` (default 30000) parameters to chunk response output. Listing users for a large organization can exceed typical MCP tool-result token caps when returned whole. When a response is truncated, the output ends with a footer like:
+`listUsers` pages through users with `maxResults` (1-1000, default 100) and `startAt`; a full page ends with a note giving the next `startAt`. (Above 1000, the API stops enforcing permissions consistently and returns only your own user, so larger pages are refused.)
+
+`listUsers` and `searchUsers` also accept `offset` (default 0) and `limit` (default 30000), counted in characters of rendered output, to chunk long output. When a response is truncated, it ends with a footer like:
 
 ```
 [truncated: showing chars 0-30000 of 102783. Call again with offset=30000 for the next chunk.]
 ```
 
-Pass that `offset` back to fetch the next chunk. Small responses return in one call. The upstream API's `firstResultIndex`/`maxResults` row-pagination is preserved unchanged on both tools.
+Pass that `offset` back to fetch the next chunk.
+
+## Output
+
+Tool output is Markdown written for a language model: tables for listings, labeled fields for details, empty fields dropped, and API errors as one readable line.
 
 ## Prerequisites
 
@@ -157,7 +170,7 @@ Add to `.cursor/mcp.json` in your workspace, or `~/.cursor/mcp.json` for all wor
 
 ## Authentication
 
-The server exchanges your Red Hat offline API token for a short-lived bearer token via Red Hat SSO. Tokens are cached and refreshed automatically.
+The server exchanges your Red Hat offline API token for a short-lived bearer token via Red Hat SSO. Tokens are cached, refreshed automatically, and exchanged again if the API rejects a cached one. Every request times out after 30 seconds.
 
 ## Releasing
 
